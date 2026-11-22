@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Star Catcher — built from one prompt</title>
+<style>
+  body { margin: 0; background: #0d0a12; color: #fff; font-family: system-ui, sans-serif;
+         display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+  h1 { margin: 18px 0 4px; font-size: 28px; letter-spacing: 2px; }
+  h1 span { color: #ff5ec4; }
+  p { margin: 4px 0 14px; color: #b9b3c0; font-size: 14px; }
+  canvas { border: 2px solid #ff5ec4; border-radius: 12px; box-shadow: 0 0 32px #c41c8355;
+           background: #14101d; max-width: 96vw; }
+  .foot { margin-top: 12px; font-size: 13px; color: #8a8494; }
+</style>
+</head>
+<body>
+<h1>⭐ STAR <span>CATCHER</span></h1>
+<p>Move the basket with your mouse or arrow keys. Catch stars, dodge nothing — just don't drop them.</p>
+<canvas id="game" width="960" height="540"></canvas>
+<p class="foot">Golden stars are worth 5&times;. Miss 3 stars and it's game over. Built from one prompt on make.fun.</p>
+<script>
+"use strict";
+// Star Catcher — a tiny browser game built from a single prompt.
+// Rules: catch falling stars in the basket. Star = +10, golden star = +50.
+// A star that hits the floor costs one life. Three lost lives = game over.
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = 960, H = 540;
+
+const BASKET = { w: 110, h: 18, y: 500, speed: 420 };
+const SPAWN_EVERY = 0.55;          // seconds between stars
+const FALL_MIN = 180, FALL_MAX = 260; // px per second
+const GOLDEN_CHANCE = 1 / 8;
+const LIVES_START = 3;
+
+const state = {
+  mode: "title", // title | playing | over
+  score: 0, combo: 0, best: 0, lives: LIVES_START,
+  basketX: W / 2 - BASKET.w / 2, targetX: W / 2 - BASKET.w / 2,
+  stars: [], particles: [], popups: [],
+  spawnIn: 0, time: 0, keys: {},
+};
+
+function spawnStar() {
+  const golden = Math.random() < GOLDEN_CHANCE;
+  state.stars.push({
+    x: 30 + Math.random() * (W - 60),
+    y: -20,
+    vy: FALL_MIN + Math.random() * (FALL_MAX - FALL_MIN),
+    r: golden ? 16 : 14,
+    golden,
+    spin: Math.random() * Math.PI * 2,
+    spinSpeed: (Math.random() - 0.5) * 3,
+  });
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = 60 + Math.random() * 160;
+    state.particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 40,
+                           life: 0.5 + Math.random() * 0.3, color });
+  }
+}
+
+function drawStar(x, y, r, rot, color) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 18;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  for (let i = 0; i < 8; i++) {
+    const ang = (i * Math.PI) / 4;
+    const rad = i % 2 === 0 ? r : r * 0.38;
+    ctx[i === 0 ? "moveTo" : "lineTo"](Math.cos(ang) * rad, Math.sin(ang) * rad);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawBasket() {
+  const x = state.basketX, y = BASKET.y;
+  ctx.save();
+  ctx.shadowColor = "#ff5ec4";
+  ctx.shadowBlur = 22;
+  const g = ctx.createLinearGradient(x, y, x, y + BASKET.h);
+  g.addColorStop(0, "#ff8fd4");
+  g.addColorStop(1, "#c41c83");
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.roundRect(x, y, BASKET.w, BASKET.h, 9);
+  ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x + 8, y + 4, BASKET.w - 16, 3);
+}
+
+function drawHUD() {
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 26px system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText("SCORE  " + state.score, 18, 38);
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#ff5ec4";
+  ctx.fillText("♥".repeat(state.lives) + "♡".repeat(LIVES_START - state.lives), W - 18, 38);
+  if (state.combo >= 3) {
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffd94d";
+    ctx.font = "bold 22px system-ui, sans-serif";
+    ctx.fillText("COMBO x" + state.combo, W / 2, 38);
+  }
+}
+
+function update(dt) {
+  state.time += dt;
+  // Basket follows mouse target, or arrow keys, or (demo) the lowest star.
+  const demo = new URLSearchParams(location.search).has("demo");
+  if (demo && state.stars.length) {
+    let lowest = state.stars[0];
+    for (const s of state.stars) if (s.y > lowest.y) lowest = s;
+    state.targetX = lowest.x - BASKET.w / 2;
+  }
+  if (state.keys["ArrowLeft"])  state.targetX -= BASKET.speed * dt;
+  if (state.keys["ArrowRight"]) state.targetX += BASKET.speed * dt;
+  state.targetX = Math.max(0, Math.min(W - BASKET.w, state.targetX));
+  const dx = state.targetX - state.basketX;
+  const step = BASKET.speed * dt;
+  state.basketX += Math.abs(dx) < step ? dx : Math.sign(dx) * step;
+
+  state.spawnIn -= dt;
+  if (state.spawnIn <= 0) { spawnStar(); state.spawnIn = SPAWN_EVERY; }
+
+  for (let i = state.stars.length - 1; i >= 0; i--) {
+    const s = state.stars[i];
+    s.y += s.vy * dt;
+    s.spin += s.spinSpeed * dt;
+    const caught = s.y + s.r >= BASKET.y && s.y <= BASKET.y + BASKET.h + 6 &&
+                   s.x > state.basketX - 6 && s.x < state.basketX + BASKET.w + 6;
+    if (caught) {
+      const pts = s.golden ? 50 : 10;
+      state.score += pts;
+      state.combo += 1;
+      state.best = Math.max(state.best, state.combo);
+      burst(s.x, s.y, s.golden ? "#ffd94d" : "#7ee7ff", s.golden ? 22 : 12);
+      state.popups.push({ x: s.x, y: s.y, text: "+" + pts, life: 0.9,
+                          color: s.golden ? "#ffd94d" : "#ffffff" });
+      state.stars.splice(i, 1);
+    } else if (s.y - s.r > H) {
+      state.stars.splice(i, 1);
+      state.lives -= 1;
+      state.combo = 0;
+      burst(s.x, H - 8, "#ff4d6d", 10);
+      if (state.lives <= 0) state.mode = "over";
+    }
+  }
+  for (let i = state.particles.length - 1; i >= 0; i--) {
+    const p = state.particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 260 * dt; p.life -= dt;
+    if (p.life <= 0) state.particles.splice(i, 1);
+  }
+  for (let i = state.popups.length - 1; i >= 0; i--) {
+    const p = state.popups[i];
+    p.y -= 34 * dt; p.life -= dt;
+    if (p.life <= 0) state.popups.splice(i, 1);
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, "#171226");
+  bg.addColorStop(1, "#0d0a12");
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+  // faint stars in the sky
+  ctx.fillStyle = "#ffffff22";
+  for (let i = 0; i < 40; i++) {
+    const x = (i * 173) % W, y = (i * 97) % 300;
+    ctx.fillRect(x, y, 2, 2);
+  }
+  for (const s of state.stars) drawStar(s.x, s.y, s.r, s.spin, s.golden ? "#ffd94d" : "#7ee7ff");
+  for (const p of state.particles) {
+    ctx.globalAlpha = Math.max(0, p.life * 2);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+  drawBasket();
+  for (const p of state.popups) {
+    ctx.globalAlpha = Math.min(1, p.life * 2);
+    ctx.fillStyle = p.color;
+    ctx.font = "bold 24px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(p.text, p.x, p.y);
+  }
+  ctx.globalAlpha = 1;
+  drawHUD();
+  if (state.mode === "title") {
+    ctx.fillStyle = "#00000099";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 52px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("STAR CATCHER", W / 2, H / 2 - 30);
+    ctx.fillStyle = "#ff8fd4";
+    ctx.font = "24px system-ui, sans-serif";
+    ctx.fillText("Click or press any key to play", W / 2, H / 2 + 22);
+  } else if (state.mode === "over") {
+    ctx.fillStyle = "#000000aa";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 52px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("GAME OVER", W / 2, H / 2 - 30);
+    ctx.fillStyle = "#ffd94d";
+    ctx.font = "bold 30px system-ui, sans-serif";
+    ctx.fillText("Score: " + state.score + "   Best combo: x" + state.best, W / 2, H / 2 + 24);
+    ctx.fillStyle = "#b9b3c0";
+    ctx.font = "22px system-ui, sans-serif";
+    ctx.fillText("Press R to play again", W / 2, H / 2 + 66);
+  }
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  if (state.mode === "playing") update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+function start() {
+  if (state.mode !== "playing") {
+    state.mode = "playing";
+    state.score = 0; state.combo = 0; state.best = 0; state.lives = LIVES_START;
+    state.stars = []; state.particles = []; state.popups = [];
+    state.spawnIn = 0.3;
+  }
+}
+
+canvas.addEventListener("pointermove", (e) => {
+  const r = canvas.getBoundingClientRect();
+  state.targetX = ((e.clientX - r.left) / r.width) * W - BASKET.w / 2;
+});
+canvas.addEventListener("pointerdown", start);
+window.addEventListener("keydown", (e) => {
+  state.keys[e.key] = true;
+  if (e.key === "r" || e.key === "R") { state.mode = "title"; start(); }
+  else start();
+});
+window.addEventListener("keyup", (e) => { state.keys[e.key] = false; });
+if (new URLSearchParams(location.search).has("demo")) start();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
